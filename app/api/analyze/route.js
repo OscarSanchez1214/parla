@@ -1,43 +1,40 @@
 import OpenAI from 'openai';
 
 export const runtime = 'nodejs';
-export const maxDuration = 60; // opcional: por si la imagen tarda
-
-const client = new OpenAI({
-  baseURL: 'https://api.deepseek.com',
-  apiKey: process.env.DEEPSEEK_API_KEY,
-});
+export const dynamic = 'force-dynamic'; // evita que Next intente pre-renderizar
 
 export async function POST(req) {
   try {
-    // 1. Leer el body
+    // 1. Leer body
     const { text = '', image, tone = 'natural', goal = 'responder' } = await req.json();
 
     // 2. Validaciones
     if (!text.trim() && !image) {
-      return Response.json(
-        { error: 'Agrega texto o una imagen.' },
-        { status: 400 }
-      );
+      return Response.json({ error: 'Agrega texto o una imagen.' }, { status: 400 });
     }
 
-    if (!process.env.DEEPSEEK_API_KEY) {
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+    if (!apiKey) {
       return Response.json(
-        { error: 'Falta configurar DEEPSEEK_API_KEY en .env.local o en Vercel.' },
+        { error: 'Falta configurar DEEPSEEK_API_KEY en Vercel.' },
         { status: 500 }
       );
     }
 
-    // 3. Construir el contenido del mensaje de usuario
-    const userContent = [];
+    // 3. Instanciar el cliente AQUÍ, no arriba
+    const client = new OpenAI({
+      baseURL: 'https://api.deepseek.com',
+      apiKey,
+    });
 
+    // 4. Construir contenido
+    const userContent = [];
     if (image) {
       userContent.push({
         type: 'image_url',
         image_url: { url: image, detail: 'auto' },
       });
     }
-
     userContent.push({
       type: 'text',
       text:
@@ -53,7 +50,7 @@ export async function POST(req) {
         `- Sé respetuoso, auténtico, no manipulador, no inventes datos.`,
     });
 
-    // 4. Llamar a DeepSeek (Chat Completions, compatible con OpenAI SDK)
+    // 5. Llamar a DeepSeek
     const completion = await client.chat.completions.create({
       model: process.env.DEEPSEEK_MODEL || 'deepseek-flash',
       messages: [
@@ -68,9 +65,8 @@ export async function POST(req) {
       response_format: { type: 'json_object' },
     });
 
-    // 5. Parsear la respuesta
+    // 6. Parsear respuesta
     let raw = completion.choices?.[0]?.message?.content?.trim() || '';
-    // Limpieza defensiva por si el modelo aún así mete ```json
     raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
 
     let data;
@@ -84,13 +80,10 @@ export async function POST(req) {
       );
     }
 
-    // 6. Normalizar por si faltan campos
     const safe = {
       intent: data.intent || 'Sin clasificar',
       context: data.context || 'No se pudo leer el contexto.',
-      responses: Array.isArray(data.responses)
-        ? data.responses.slice(0, 3)
-        : [],
+      responses: Array.isArray(data.responses) ? data.responses.slice(0, 3) : [],
       advice: data.advice || '',
     };
 
