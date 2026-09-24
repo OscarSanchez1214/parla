@@ -1,3 +1,105 @@
 import OpenAI from 'openai';
-export const runtime='nodejs';
-export async function POST(req){try{const {text='',image,tone='natural',goal='responder'}=await req.json();if(!text.trim()&&!image)return Response.json({error:'Agrega texto o una imagen.'},{status:400});if(!process.env.OPENAI_API_KEY)return Response.json({error:'Falta configurar OPENAI_API_KEY en .env.local.'},{status:500});const client=new OpenAI({apiKey:process.env.OPENAI_API_KEY});const content=[{type:'input_text',text:`Analiza esta conversación y responde en español. Objetivo: ${goal}. Tono preferido: ${tone}. Texto: ${text||'(extrae el chat de la imagen)'}. Devuelve SOLO JSON válido con esta forma: {"intent":"...","context":"...","responses":[{"style":"...","text":"..."},{"style":"...","text":"..."},{"style":"...","text":"..."}],"advice":"..."}. Sé respetuoso, auténtico, no manipulative y no inventes datos.`}];if(image)content.push({type:'input_image',image_url:image});const r=await client.responses.create({model:process.env.OPENAI_MODEL||'gpt-4o-mini',input:[{role:'user',content}],temperature:0.8});let raw=r.output_text.trim().replace(/^```json|```$/g,'').trim();return Response.json(JSON.parse(raw));}catch(e){return Response.json({error:e.message||'Error del servidor'},{status:500})}}
+
+export const runtime = 'nodejs';
+export const maxDuration = 60; // opcional: por si la imagen tarda
+
+const client = new OpenAI({
+  baseURL: 'https://api.deepseek.com',
+  apiKey: process.env.DEEPSEEK_API_KEY,
+});
+
+export async function POST(req) {
+  try {
+    // 1. Leer el body
+    const { text = '', image, tone = 'natural', goal = 'responder' } = await req.json();
+
+    // 2. Validaciones
+    if (!text.trim() && !image) {
+      return Response.json(
+        { error: 'Agrega texto o una imagen.' },
+        { status: 400 }
+      );
+    }
+
+    if (!process.env.DEEPSEEK_API_KEY) {
+      return Response.json(
+        { error: 'Falta configurar DEEPSEEK_API_KEY en .env.local o en Vercel.' },
+        { status: 500 }
+      );
+    }
+
+    // 3. Construir el contenido del mensaje de usuario
+    const userContent = [];
+
+    if (image) {
+      userContent.push({
+        type: 'image_url',
+        image_url: { url: image, detail: 'auto' },
+      });
+    }
+
+    userContent.push({
+      type: 'text',
+      text:
+        `Analiza esta conversación y responde en español.\n` +
+        `Objetivo: ${goal}.\n` +
+        `Tono preferido: ${tone}.\n` +
+        `Texto de la conversación: ${text || '(extrae el chat de la imagen)'}.\n\n` +
+        `Devuelve SOLO JSON válido, sin markdown, con esta forma exacta:\n` +
+        `{"intent":"...","context":"...","responses":[{"style":"...","text":"..."},{"style":"...","text":"..."},{"style":"...","text":"..."}],"advice":"..."}\n\n` +
+        `Reglas:\n` +
+        `- Exactamente 3 elementos en "responses".\n` +
+        `- Cada "text" debe ser enviable tal cual, sin comillas extra.\n` +
+        `- Sé respetuoso, auténtico, no manipulador, no inventes datos.`,
+    });
+
+    // 4. Llamar a DeepSeek (Chat Completions, compatible con OpenAI SDK)
+    const completion = await client.chat.completions.create({
+      model: process.env.DEEPSEEK_MODEL || 'deepseek-flash',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'Eres un asistente experto en comunicación interpersonal. Siempre respondes con JSON válido y nada más.',
+        },
+        { role: 'user', content: userContent },
+      ],
+      temperature: 0.8,
+      response_format: { type: 'json_object' },
+    });
+
+    // 5. Parsear la respuesta
+    let raw = completion.choices?.[0]?.message?.content?.trim() || '';
+    // Limpieza defensiva por si el modelo aún así mete ```json
+    raw = raw.replace(/^```json\s*/i, '').replace(/```$/, '').trim();
+
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch (parseErr) {
+      console.error('JSON inválido del modelo:', raw);
+      return Response.json(
+        { error: 'El modelo devolvió un formato inválido. Intenta de nuevo.' },
+        { status: 502 }
+      );
+    }
+
+    // 6. Normalizar por si faltan campos
+    const safe = {
+      intent: data.intent || 'Sin clasificar',
+      context: data.context || 'No se pudo leer el contexto.',
+      responses: Array.isArray(data.responses)
+        ? data.responses.slice(0, 3)
+        : [],
+      advice: data.advice || '',
+    };
+
+    return Response.json(safe);
+  } catch (e) {
+    console.error('Error en /api/analyze:', e);
+    return Response.json(
+      { error: e.message || 'Error del servidor' },
+      { status: 500 }
+    );
+  }
+}
